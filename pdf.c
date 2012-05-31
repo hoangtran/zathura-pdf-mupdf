@@ -8,18 +8,21 @@
 #include "pdf.h"
 
 /* forward declarations */
-static inline int text_span_char_at(fz_text_span *span, int index);
-static unsigned int text_span_length(fz_text_span *span);
-static int text_span_match_string_n(fz_text_span* span, const char* string,
+
+static inline int textcharat(fz_text_page *page, int idx);
+static unsigned int textlength(fz_text_page *page);
+static int text_match_string_n(fz_text_page* page, const char* string,
     int n, zathura_rectangle_t* rectangle);
+#if 0
 static void pdf_zathura_image_free(zathura_image_t* image);
 static void get_images(fz_obj* dict, girara_list_t* list);
 static void get_resources(fz_obj* resource, girara_list_t* list);
+#endif
 static void search_result_add_char(zathura_rectangle_t* rectangle,
-    fz_text_span* span, int n);
-static void mupdf_page_extract_text(pdf_xref* document,
+    fz_text_page* page, int n);
+static void mupdf_page_extract_text(mupdf_document_t* mupdf_document,
     mupdf_page_t* mupdf_page);
-static void build_index(mupdf_document_t* mupdf_document, pdf_outline* outline,
+static void build_index(mupdf_document_t* mupdf_document, fz_outline* outline,
     girara_tree_node_t* root);
 
 void
@@ -30,13 +33,13 @@ register_functions(zathura_plugin_functions_t* functions)
   functions->document_index_generate  = (zathura_plugin_document_index_generate_t) pdf_document_index_generate;
   functions->page_init                = (zathura_plugin_page_init_t) pdf_page_init;
   functions->page_clear               = (zathura_plugin_page_clear_t) pdf_page_clear;
-  functions->page_search_text         = (zathura_plugin_page_search_text_t) pdf_page_search_text;
+//  functions->page_search_text         = (zathura_plugin_page_search_text_t) pdf_page_search_text;
   functions->page_links_get           = (zathura_plugin_page_links_get_t )pdf_page_links_get;
 #if 0
   functions->page_images_get          = (zathura_plugin_page_images_get_t) pdf_page_images_get;
 #endif
   functions->page_get_text            = (zathura_plugin_page_get_text_t) pdf_page_get_text;
-  functions->document_get_information = (zathura_plugin_document_get_information_t) pdf_document_get_information;
+  //functions->document_get_information = (zathura_plugin_document_get_information_t) pdf_document_get_information;
   functions->page_render              = (zathura_plugin_page_render_t) pdf_page_render;
 #if HAVE_CAIRO
   functions->page_render_cairo        = (zathura_plugin_page_render_cairo_t) pdf_page_render_cairo;
@@ -67,28 +70,28 @@ pdf_document_open(zathura_document_t* document)
     goto error_ret;
   }
 
-  fz_accelerate();
-  mupdf_document->glyph_cache = fz_new_glyph_cache();
-
-  if (pdf_open_xref(&(mupdf_document->document), zathura_document_get_path(document), NULL) != fz_okay) {
+  mupdf_document->context = fz_new_context(NULL, NULL, FZ_STORE_DEFAULT);
+  if (!mupdf_document->context) {
     error = ZATHURA_ERROR_UNKNOWN;
     goto error_free;
   }
 
-  if (pdf_needs_password(mupdf_document->document) != 0) {
+  mupdf_document->document = fz_open_document(mupdf_document->context,
+		  			      (char *)zathura_document_get_path(document));
+  if (!mupdf_document->document) {
+    error = ZATHURA_ERROR_UNKNOWN;
+    goto error_free;
+  }
+
+  if (fz_needs_password(mupdf_document->document) != 0) {
     const char* password = zathura_document_get_password(document);
-    if (password == NULL || pdf_authenticate_password(mupdf_document->document, (char*) password) != 0) {
+    if (password == NULL || fz_authenticate_password(mupdf_document->document, (char*) password) != 0) {
       error = ZATHURA_ERROR_INVALID_PASSWORD;
       goto error_free;
     }
   }
 
-  if (pdf_load_page_tree(mupdf_document->document) != fz_okay) {
-    error = ZATHURA_ERROR_UNKNOWN;
-    goto error_free;
-  }
-
-  zathura_document_set_number_of_pages(document, pdf_count_pages(mupdf_document->document));
+  zathura_document_set_number_of_pages(document, fz_count_pages(mupdf_document->document));
   zathura_document_set_data(document, mupdf_document);
 
   return error;
@@ -97,11 +100,11 @@ error_free:
 
   if (mupdf_document != NULL) {
     if (mupdf_document->document != NULL) {
-      pdf_free_xref(mupdf_document->document);
+      fz_close_document(mupdf_document->document);
     }
 
-    if (mupdf_document->glyph_cache != NULL) {
-      fz_free_glyph_cache(mupdf_document->glyph_cache);
+    if (mupdf_document->context != NULL) {
+      fz_free_context(mupdf_document->context);
     }
 
     free(mupdf_document);
@@ -121,8 +124,8 @@ pdf_document_free(zathura_document_t* document, mupdf_document_t* mupdf_document
     return ZATHURA_ERROR_INVALID_ARGUMENTS;
   }
 
-  pdf_free_xref(mupdf_document->document);
-  fz_free_glyph_cache(mupdf_document->glyph_cache);
+  fz_close_document(mupdf_document->document);
+  fz_free_context(mupdf_document->context);
   free(mupdf_document);
   zathura_document_set_data(document, NULL);
 
@@ -140,7 +143,7 @@ pdf_document_index_generate(zathura_document_t* document, mupdf_document_t* mupd
   }
 
   /* get outline */
-  pdf_outline* outline = pdf_load_outline(mupdf_document->document);
+  fz_outline* outline = fz_load_outline(mupdf_document->document);
   if (outline == NULL) {
     if (error != NULL) {
       *error = ZATHURA_ERROR_UNKNOWN;
@@ -153,7 +156,7 @@ pdf_document_index_generate(zathura_document_t* document, mupdf_document_t* mupd
   build_index(mupdf_document, outline, root);
 
   /* free outline */
-  pdf_free_outline(outline);
+  fz_free_outline(mupdf_document->context, outline);
 
   return root;
 }
@@ -161,6 +164,7 @@ pdf_document_index_generate(zathura_document_t* document, mupdf_document_t* mupd
 zathura_error_t
 pdf_page_init(zathura_page_t* page)
 {
+  fz_rect page_bbox;
   if (page == NULL) {
     return ZATHURA_ERROR_INVALID_ARGUMENTS;
   }
@@ -176,17 +180,19 @@ pdf_page_init(zathura_page_t* page)
   zathura_page_set_data(page, mupdf_page);
 
   /* load page */
-  if (pdf_load_page(&(mupdf_page->page), mupdf_document->document, zathura_page_get_index(page)) != fz_okay) {
+  mupdf_page->page = fz_load_page(mupdf_document->document, zathura_page_get_index(page));
+  if (!mupdf_page->page) {
     goto error_free;
   }
 
+  mupdf_page->page_bbox = fz_bound_page(mupdf_document->document, mupdf_page->page);
   /* get page dimensions */
-  zathura_page_set_width(page,  mupdf_page->page->mediabox.x1 - mupdf_page->page->mediabox.x0);
-  zathura_page_set_height(page, mupdf_page->page->mediabox.y1 - mupdf_page->page->mediabox.y0);
+  zathura_page_set_width(page,  page_bbox.x1 - page_bbox.x0);
+  zathura_page_set_height(page, page_bbox.y1 - page_bbox.y0);
 
   /* setup text */
   mupdf_page->extracted_text = false;
-  mupdf_page->text           = fz_new_text_span();
+  mupdf_page->text           = fz_new_text_page(mupdf_document->context, mupdf_page->page_bbox);
   if (mupdf_page->text == NULL) {
     goto error_free;
   }
@@ -197,11 +203,11 @@ error_free:
 
   if (mupdf_page != NULL) {
     if (mupdf_page->page != NULL) {
-      pdf_free_page(mupdf_page->page);
+      fz_free_page(mupdf_document->document, mupdf_page->page);
     }
 
     if (mupdf_page->text != NULL) {
-      fz_free_text_span(mupdf_page->text);
+      fz_free_text_page(mupdf_document->context, mupdf_page->text);
     }
 
     free(mupdf_page);
@@ -217,13 +223,16 @@ pdf_page_clear(zathura_page_t* page, mupdf_page_t* mupdf_page)
     return ZATHURA_ERROR_INVALID_ARGUMENTS;
   }
 
+  zathura_document_t* document     = zathura_page_get_document(page);
+  mupdf_document_t* mupdf_document = zathura_document_get_data(document);
+
   if (mupdf_page != NULL) {
     if (mupdf_page->text != NULL) {
-      fz_free_text_span(mupdf_page->text);
+      fz_free_text_page(mupdf_document->context, mupdf_page->text);
     }
 
     if (mupdf_page->page != NULL) {
-      pdf_free_page(mupdf_page->page);
+      fz_free_page(mupdf_document->document, mupdf_page->page);
     }
 
     free(mupdf_page);
@@ -255,7 +264,7 @@ pdf_page_search_text(zathura_page_t* page, mupdf_page_t* mupdf_page, const char*
 
   /* extract text (only once) */
   if (mupdf_page->extracted_text == false) {
-    mupdf_page_extract_text(mupdf_document->document, mupdf_page);
+    mupdf_page_extract_text(mupdf_document, mupdf_page);
   }
 
   girara_list_t* list = girara_list_new2((girara_free_function_t) zathura_link_free);
@@ -268,12 +277,12 @@ pdf_page_search_text(zathura_page_t* page, mupdf_page_t* mupdf_page, const char*
 
   double page_height = zathura_page_get_height(page);
 
-  unsigned int length = text_span_length(mupdf_page->text);
+  unsigned int length = textlength(mupdf_page->text);
   for (int i = 0; i < length; i++) {
     zathura_rectangle_t* rectangle = g_malloc0(sizeof(zathura_rectangle_t));
 
     /* search for string */
-    int match = text_span_match_string_n(mupdf_page->text, text, i, rectangle);
+    int match = text_match_string_n(mupdf_page->text, text, i, rectangle);
     if (match == 0) {
       g_free(rectangle);
       continue;
@@ -329,7 +338,7 @@ pdf_page_links_get(zathura_page_t* page, mupdf_page_t* mupdf_page, zathura_error
 
   double page_height = zathura_page_get_height(page);
 
-  pdf_link* link = mupdf_page->page->links;
+  fz_link* link = fz_load_links(mupdf_document->document, mupdf_page->page);
   for (; link != NULL; link = link->next) {
     /* extract position */
     zathura_rectangle_t position;
@@ -342,19 +351,20 @@ pdf_page_links_get(zathura_page_t* page, mupdf_page_t* mupdf_page, zathura_error
     zathura_link_target_t target = { 0 };
 
     char* buffer = NULL;
-    switch (link->kind) {
-      case PDF_LINK_URI:
-        buffer = g_malloc0(sizeof(char) * (fz_to_str_len(link->dest) + 1));
-        memcpy(buffer, fz_to_str_buf(link->dest), fz_to_str_len(link->dest));
-        buffer[fz_to_str_len(link->dest)] = '\0';
+    int len = 0;
+    switch (link->dest.kind) {
+      case FZ_LINK_URI:
+	len = strlen(link->dest.ld.uri.uri);
+        buffer = g_malloc0(sizeof(char) * len + 1);
+        memcpy(buffer, link->dest.ld.uri.uri, len);
+        buffer[len] = '\0';
 
         type         = ZATHURA_LINK_URI;
         target.value = buffer;
         break;
-      case PDF_LINK_GOTO:
+      case FZ_LINK_GOTO:
         type               = ZATHURA_LINK_GOTO_DEST;
-        target.page_number = pdf_find_page_number(mupdf_document->document,
-            fz_array_get(link->dest, 0));
+        target.page_number = link->dest.ld.gotor.page;
         break;
       default:
         continue;
@@ -396,28 +406,35 @@ pdf_page_get_text(zathura_page_t* page, mupdf_page_t* mupdf_page, zathura_rectan
   GString* text      = g_string_new(NULL);
   double page_height = zathura_page_get_height(page);
 
-  for (fz_text_span* span = mupdf_page->text; span != NULL; span = span->next) {
-    bool seen = false;
-
-    for (int i = 0; i < span->len; i++) {
-      fz_bbox hitbox = fz_transform_bbox(fz_identity, span->text[i].bbox);
-      int c = span->text[i].c;
-
-      if (c < 32) {
-        c = '?';
+  fz_text_block *block;
+  fz_text_line *line;
+  fz_text_span *span;
+  for (block = mupdf_page->text->blocks; block < mupdf_page->text->blocks + mupdf_page->text->len; block++) {
+    for (line = block->lines; line < block->lines + block->len; line++) {
+      for (span = line->spans; span < line->spans + line->len; span++) {
+        bool seen = false;
+    
+        for (int i = 0; i < span->len; i++) {
+          fz_rect hitbox = fz_transform_rect(fz_identity, span->text[i].bbox);
+          int c = span->text[i].c;
+    
+          if (c < 32) {
+            c = '?';
+          }
+    
+          if (hitbox.x1 >= rectangle.x1
+              && hitbox.x0 <= rectangle.x2
+              && (page_height - hitbox.y1) >= rectangle.y1
+              && (page_height - hitbox.y0) <= rectangle.y2) {
+            g_string_append_c(text, c);
+            seen = true;
+          }
+        }
+    
+        if (seen == true && (span + 1 == line->spans + line->len)) {
+          g_string_append_c(text, '\n');
+        }
       }
-
-      if (hitbox.x1 >= rectangle.x1
-          && hitbox.x0 <= rectangle.x2
-          && (page_height - hitbox.y1) >= rectangle.y1
-          && (page_height - hitbox.y0) <= rectangle.y2) {
-        g_string_append_c(text, c);
-        seen = true;
-      }
-    }
-
-    if (seen == true && span->eol != 0) {
-      g_string_append_c(text, '\n');
     }
   }
 
@@ -439,6 +456,7 @@ error_ret:
   return NULL;
 }
 
+#if 0
 girara_list_t*
 pdf_page_images_get(zathura_page_t* page, mupdf_page_t* mupdf_page, zathura_error_t* error)
 {
@@ -494,7 +512,9 @@ error_ret:
 
   return NULL;
 }
+#endif
 
+#if 0
 girara_list_t*
 pdf_document_get_information(zathura_document_t* document, mupdf_document_t*
     mupdf_document, zathura_error_t* error)
@@ -550,6 +570,7 @@ pdf_document_get_information(zathura_document_t* document, mupdf_document_t*
 
   return list;
 }
+#endif
 
 zathura_image_buffer_t*
 pdf_page_render(zathura_page_t* page, mupdf_page_t* mupdf_page, zathura_error_t* error)
@@ -584,25 +605,20 @@ pdf_page_render(zathura_page_t* page, mupdf_page_t* mupdf_page, zathura_error_t*
   mupdf_document_t* mupdf_document = zathura_document_get_data(document);
 
   /* render */
-  fz_display_list* display_list = fz_new_display_list();
-  fz_device* device             = fz_new_list_device(display_list);
+  fz_display_list* display_list = fz_new_display_list(mupdf_document->context);
+  fz_device* device             = fz_new_list_device(mupdf_document->context, display_list);
 
-  if (pdf_run_page(mupdf_document->document, mupdf_page->page, device, fz_scale(scale, scale)) != fz_okay) {
-    if (error != NULL) {
-      *error = ZATHURA_ERROR_UNKNOWN;
-    }
-    return NULL;
-  }
+  fz_run_page(mupdf_document->document, mupdf_page->page, device, fz_scale(scale, scale), NULL);
 
   fz_free_device(device);
 
   fz_bbox bbox = { .x1 = page_width, .y1 = page_height };
 
-  fz_pixmap* pixmap = fz_new_pixmap_with_rect(fz_device_rgb, bbox);
-  fz_clear_pixmap_with_color(pixmap, 0xFF);
+  fz_pixmap* pixmap = fz_new_pixmap_with_bbox(mupdf_document->context, fz_device_rgb, bbox);
+  fz_clear_pixmap_with_value(mupdf_document->context, pixmap, 0xFF);
 
-  device = fz_new_draw_device(mupdf_document->glyph_cache, pixmap);
-  fz_execute_display_list(display_list, device, fz_identity, bbox);
+  device = fz_new_draw_device(mupdf_document->context, pixmap);
+  fz_run_display_list(display_list, device, fz_identity, bbox, NULL);
   fz_free_device(device);
 
   unsigned char* s = pixmap->samples;
@@ -617,8 +633,8 @@ pdf_page_render(zathura_page_t* page, mupdf_page_t* mupdf_page, zathura_error_t*
     }
   }
 
-  fz_drop_pixmap(pixmap);
-  fz_free_display_list(display_list);
+  fz_drop_pixmap(mupdf_document->context, pixmap);
+  fz_free_display_list(mupdf_document->context, display_list);
 
   return image_buffer;
 }
@@ -650,23 +666,21 @@ pdf_page_render_cairo(zathura_page_t* page, mupdf_page_t* mupdf_page, cairo_t* c
   double scaley = ((double) page_height) /zathura_page_get_height(page);
 
   /* render */
-  fz_display_list* display_list = fz_new_display_list();
-  fz_device* device             = fz_new_list_device(display_list);
+  fz_display_list* display_list = fz_new_display_list(mupdf_document->context);
+  fz_device* device             = fz_new_list_device(mupdf_document->context, display_list);
 
-  if (pdf_run_page(mupdf_document->document, mupdf_page->page, device, fz_scale(scalex, scaley)) != fz_okay) {
-    return ZATHURA_ERROR_UNKNOWN;
-  }
+  fz_run_page(mupdf_document->document, mupdf_page->page, device, fz_scale(scalex, scaley), NULL);
 
   fz_free_device(device);
 
 
   fz_bbox bbox = { .x1 = page_width, .y1 = page_height };
 
-  fz_pixmap* pixmap = fz_new_pixmap_with_rect(fz_device_rgb, bbox);
-  fz_clear_pixmap_with_color(pixmap, 0xFF);
+  fz_pixmap* pixmap = fz_new_pixmap_with_bbox(mupdf_document->context, fz_device_rgb, bbox);
+  fz_clear_pixmap_with_value(mupdf_document->context, pixmap, 0xFF);
 
-  device = fz_new_draw_device(mupdf_document->glyph_cache, pixmap);
-  fz_execute_display_list(display_list, device, fz_identity, bbox);
+  device = fz_new_draw_device(mupdf_document->context, pixmap);
+  fz_run_display_list(display_list, device, fz_identity, bbox, NULL);
   fz_free_device(device);
 
   int rowstride        = cairo_image_surface_get_stride(surface);
@@ -683,59 +697,61 @@ pdf_page_render_cairo(zathura_page_t* page, mupdf_page_t* mupdf_page, cairo_t* c
     }
   }
 
-  fz_drop_pixmap(pixmap);
-  fz_free_display_list(display_list);
+  fz_drop_pixmap(mupdf_document->context, pixmap);
+  fz_free_display_list(mupdf_document->context, display_list);
 
   return ZATHURA_ERROR_OK;;
 }
 #endif
 
 static inline int
-text_span_char_at(fz_text_span *span, int index)
+textcharat(fz_text_page *page, int idx)
 {
-  int offset = 0;
-  while (span != NULL) {
-    if (index < offset + span->len) {
-      return span->text[index - offset].c;
-    }
-
-    if (span->eol != 0) {
-      if (index == offset + span->len) {
-        return ' ';
+  static fz_text_char emptychar = { {0,0,0,0}, ' ' };
+  fz_text_block *block;
+  fz_text_line *line;
+  fz_text_span *span;
+  int ofs = 0;
+  for (block = page->blocks; block < page->blocks + page->len; block++) {
+    for (line = block->lines; line < block->lines + block->len; line++) {
+      for (span = line->spans; span < line->spans + line->len; span++) {
+	if (idx < ofs + span->len)
+	  return span->text[idx - ofs].c;
+	/* pseudo-newline */
+	if (span + 1 == line->spans + line->len) {
+	  if (idx == ofs + span->len)
+	    return emptychar.c;
+	  ofs++;
+	}
+	ofs += span->len;
       }
-      offset++;
     }
-
-    offset += span->len;
-    span = span->next;
   }
-
-  return 0;
+  return emptychar.c;
 }
 
 static unsigned int
-text_span_length(fz_text_span *span)
+textlength(fz_text_page *page)
 {
-  unsigned int length = 0;
-
-  while (span != NULL) {
-    length += span->len;
-
-    if (span->eol != 0) {
-      length++;
+  fz_text_block *block;
+  fz_text_line *line;
+  fz_text_span *span;
+  int len = 0;
+  for (block = page->blocks; block < page->blocks + page->len; block++) {
+    for (line = block->lines; line < block->lines + block->len; line++) {
+      for (span = line->spans; span < line->spans + line->len; span++)
+        len += span->len;
+      len++; /* pseudo-newline */
     }
-
-    span = span->next;
   }
-
-  return length;
+  return len;
 }
 
 static int
-text_span_match_string_n(fz_text_span* span, const char* string, int n,
+text_match_string_n(fz_text_page* page, const char* string, int n,
     zathura_rectangle_t* rectangle)
 {
-  if (span == NULL || string == NULL || rectangle == NULL) {
+  if (page == NULL || string == NULL || rectangle == NULL) {
     return 0;
   }
 
@@ -743,16 +759,16 @@ text_span_match_string_n(fz_text_span* span, const char* string, int n,
   int c;
 
   while ((c = *string++)) {
-    if (c == ' ' && text_span_char_at(span, n) == ' ') {
-      while (text_span_char_at(span, n) == ' ') {
-        search_result_add_char(rectangle, span, n);
+    if (c == ' ' && textcharat(page, n) == ' ') {
+      while (textcharat(page, n) == ' ') {
+        search_result_add_char(rectangle, page, n);
         n++;
       }
     } else {
-      if (tolower(c) != tolower(text_span_char_at(span, n))) {
+      if (tolower(c) != tolower(textcharat(page, n))) {
         return 0;
       }
-      search_result_add_char(rectangle, span, n);
+      search_result_add_char(rectangle, page, n);
       n++;
     }
   }
@@ -760,6 +776,7 @@ text_span_match_string_n(fz_text_span* span, const char* string, int n,
   return n - o;
 }
 
+#if 0
 static void
 pdf_zathura_image_free(zathura_image_t* image)
 {
@@ -838,72 +855,83 @@ get_resources(fz_obj* resource, girara_list_t* list)
     }
   }
 }
+#endif
 
 static void
-search_result_add_char(zathura_rectangle_t* rectangle, fz_text_span* span,
+search_result_add_char(zathura_rectangle_t* rectangle, fz_text_page* page,
     int index)
 {
-  if (rectangle == NULL || span == NULL) {
+  if (rectangle == NULL || page == NULL) {
     return;
   }
 
   int offset = 0;
-  for (; span != NULL; span = span->next) {
-    if (index < offset + span->len) {
-      fz_bbox coordinates = span->text[index - offset].bbox;
+  fz_text_block *block;
+  fz_text_line *line;
+  fz_text_span *span;
+  for (block = page->blocks; block < page->blocks + page->len; block++) {
+    for (line = block->lines; line < block->lines + block->len; line++) {
+      for (span = line->spans; span < line->spans + line->len; span++) {
+        if (index < offset + span->len) {
+          fz_rect coordinates = span->text[index - offset].bbox;
+    
+          if (rectangle->x1 == 0) {
+            rectangle->x1 = coordinates.x0;
+          }
+    
+          if (coordinates.x1 > rectangle->x2) {
+            rectangle->x2 = coordinates.x1;
+          }
+    
+          if (coordinates.y1 > rectangle->y1) {
+            rectangle->y1 = coordinates.y1;
+          }
+    
+          if (rectangle->y2 == 0) {
+            rectangle->y2 = coordinates.y0;
+          }
+    
+          return;
+        }
 
-      if (rectangle->x1 == 0) {
-        rectangle->x1 = coordinates.x0;
+	/* pseudo-newline */
+	if (span + 1 == line->spans + line->len) {
+	  if (index == offset + span->len)
+	    return;
+	  offset++; 
+	}
+
+        offset += span->len;
       }
 
-      if (coordinates.x1 > rectangle->x2) {
-        rectangle->x2 = coordinates.x1;
-      }
-
-      if (coordinates.y1 > rectangle->y1) {
-        rectangle->y1 = coordinates.y1;
-      }
-
-      if (rectangle->y2 == 0) {
-        rectangle->y2 = coordinates.y0;
-      }
-
-      return;
     }
-
-    if (span->eol != 0) {
-      offset++;
-    }
-
-    offset += span->len;
   }
 }
 
 static void
-mupdf_page_extract_text(pdf_xref* document, mupdf_page_t* mupdf_page)
+mupdf_page_extract_text(mupdf_document_t* mupdf_document, mupdf_page_t* mupdf_page)
 {
-  if (document == NULL || mupdf_page == NULL || mupdf_page->extracted_text == true) {
+  if (mupdf_document == NULL || mupdf_page == NULL || mupdf_page->extracted_text == true) {
     return;
   }
 
-  fz_display_list* display_list = fz_new_display_list();
-  fz_device* device             = fz_new_list_device(display_list);
-  fz_device* text_device        = fz_new_text_device(mupdf_page->text);
+  fz_display_list* display_list = fz_new_display_list(mupdf_document->context);
+  fz_device* device             = fz_new_list_device(mupdf_document->context, display_list);
+  fz_text_sheet* page_sheet	= fz_new_text_sheet(mupdf_document->context);
+  fz_device* text_device        = fz_new_text_device(mupdf_document->context, page_sheet, mupdf_page->text);
 
-  if (pdf_run_page(document, mupdf_page->page, device, fz_identity) != fz_okay) {
-    return;
-  }
+  fz_run_page(mupdf_document->document, mupdf_page->page, device, fz_identity, NULL);
 
-  fz_execute_display_list(display_list, text_device, fz_identity, fz_infinite_bbox);
+  fz_run_display_list(display_list, text_device, fz_identity, fz_infinite_bbox, NULL);
   mupdf_page->extracted_text = true;
 
   fz_free_device(text_device);
   fz_free_device(device);
-  fz_free_display_list(display_list);
+  fz_free_display_list(mupdf_document->context, display_list);
 }
 
 static void
-build_index(mupdf_document_t* mupdf_document, pdf_outline* outline, girara_tree_node_t* root)
+build_index(mupdf_document_t* mupdf_document, fz_outline* outline, girara_tree_node_t* root)
 {
   if (mupdf_document == NULL || outline == NULL || root == NULL) {
     return;
@@ -915,20 +943,21 @@ build_index(mupdf_document_t* mupdf_document, pdf_outline* outline, girara_tree_
     zathura_link_type_t type;
     zathura_rectangle_t rect;
     char* buffer = NULL;
+    int len = 0;
 
-    switch (outline->link->kind) {
-      case PDF_LINK_URI:
+    switch (outline->dest.kind) {
+      case FZ_LINK_URI:
         /* extract uri */
-        buffer = g_malloc0(sizeof(char) * (fz_to_str_len(outline->link->dest) + 1));
-        memcpy(buffer, fz_to_str_buf(outline->link->dest), fz_to_str_len(outline->link->dest));
-        buffer[fz_to_str_len(outline->link->dest)] = '\0';
+	len = strlen(outline->dest.ld.uri.uri);
+        buffer = g_malloc0(sizeof(char) * len + 1);
+        memcpy(buffer, outline->dest.ld.uri.uri, len);
+        buffer[len] = '\0';
         target.value = buffer;
 
         type = ZATHURA_LINK_URI;
         break;
-      case  PDF_LINK_GOTO:
-        target.page_number = pdf_find_page_number(mupdf_document->document,
-            fz_array_get(outline->link->dest, 0));
+      case  FZ_LINK_GOTO:
+        target.page_number = outline->dest.ld.gotor.page;
 
         type = ZATHURA_LINK_GOTO_DEST;
         break;
@@ -943,8 +972,8 @@ build_index(mupdf_document_t* mupdf_document, pdf_outline* outline, girara_tree_
 
     girara_tree_node_t* node = girara_node_append_data(root, index_element);
 
-    if (outline->child != NULL) {
-      build_index(mupdf_document, outline->child, node);
+    if (outline->down != NULL) {
+      build_index(mupdf_document, outline->down, node);
     }
 
     outline = outline->next;

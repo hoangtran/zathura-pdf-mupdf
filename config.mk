@@ -27,7 +27,7 @@ PLUGINDIR = ${LIBDIR}/zathura
 endif
 
 INCS = ${GTK_INC} ${ZATHURA_INC} ${GIRARA_INC}
-LIBS = ${GIRARA_LIB} ${GTK_LIB} -lmupdf -lfitz -ljbig2dec -lopenjpeg -ljpeg
+LIBS = ${GIRARA_LIB} ${GTK_LIB} -lfitz -lfitz -ljbig2dec -lopenjpeg -ljpeg
 
 # flags
 CFLAGS += -std=c99 -fPIC -pedantic -Wall -Wno-format-zero-length $(INCS)

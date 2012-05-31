@@ -5,8 +5,7 @@
 
 #include <stdbool.h>
 #include <zathura/plugin-api.h>
-#include <fitz.h>
-#include <mupdf.h>
+#include <fitz-internal.h>
 
 #if HAVE_CAIRO
 #include <cairo.h>
@@ -14,14 +13,16 @@
 
 typedef struct mupdf_document_s
 {
-  fz_glyph_cache *glyph_cache; /**< Glyph cache */
-  pdf_xref *document; /**< mupdf document */
+  fz_context *context; /**< fitz context */
+  fz_document *document; /**< fitz document */
 } mupdf_document_t;
 
 typedef struct mupdf_page_s
 {
-  pdf_page* page; /**< Reference to the mupdf page */
-  fz_text_span* text; /**< Page text */
+  fz_page* page; /**< Reference to the mupdf page */
+  fz_rect page_bbox;
+  fz_text_page* text; /**< Page text */
+  fz_text_sheet *sheet;
   bool extracted_text; /**< Text has been extracted */
 } mupdf_page_t;
 
