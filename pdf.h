@@ -13,17 +13,16 @@
 
 typedef struct mupdf_document_s
 {
-  fz_context *context; /**< fitz context */
-  fz_document *document; /**< fitz document */
+	fz_context *context; /**< fitz context */
+	fz_document *document; /**< fitz document */
 } mupdf_document_t;
 
 typedef struct mupdf_page_s
 {
-  fz_page* page; /**< Reference to the mupdf page */
-  fz_rect page_bbox;
-  fz_text_page* text; /**< Page text */
-  fz_text_sheet *sheet;
-  bool extracted_text; /**< Text has been extracted */
+	fz_page* page; /**< Reference to the mupdf page */
+	fz_rect page_bbox;
+	fz_text_page* text; /**< Page text */
+	bool extracted_text; /**< Text has been extracted */
 } mupdf_page_t;
 
 /**
@@ -52,7 +51,7 @@ zathura_error_t pdf_document_free(zathura_document_t* document, mupdf_document_t
  *   no index)
  */
 girara_tree_node_t* pdf_document_index_generate(zathura_document_t* document,
-    mupdf_document_t* mupdf_document, zathura_error_t* error);
+		mupdf_document_t* mupdf_document, zathura_error_t* error);
 
 /**
  * Returns a reference to a page
@@ -120,7 +119,7 @@ char* pdf_page_get_text(zathura_page_t* page, mupdf_page_t* mupdf_page, zathura_
  * @return List of information entries or NULL if an error occurred
  */
 girara_list_t* pdf_document_get_information(zathura_document_t* document,
-    mupdf_document_t* mupdf_document, zathura_error_t* error);
+		mupdf_document_t* mupdf_document, zathura_error_t* error);
 
 /**
  * Renders a page and returns a allocated image buffer which has to be freed
